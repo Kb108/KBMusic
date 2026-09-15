@@ -7,6 +7,7 @@ from telebot import types
 from shazamio import Shazam
 from dotenv import load_dotenv
 from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
 
@@ -19,6 +20,8 @@ shazam = Shazam()
 
 CHANNEL_USERNAME = "loot_dells"
 CHANNEL_LINK = "https://t.me/loot_dells"
+
+executor = ThreadPoolExecutor(max_workers=2)
 
 
 async def is_user_joined(user_id: int) -> bool:
@@ -68,15 +71,15 @@ async def recognize_audio(file_path: str):
         title = track.get("title", "Unknown")
         artist = track.get("subtitle", "Unknown Artist")
         shazam_url = track.get("url", "")
-
         return title, artist, shazam_url, None
     except Exception as e:
         return None, None, None, f"❌ Recognition error: {str(e)}"
 
 
-def download_audio(title: str, artist: str) -> str | None:
+def download_audio_sync(title: str, artist: str) -> str | None:
+    """Synchronous download function (runs in thread)"""
     query = f"ytsearch1:{title} {artist}"
-    outtmpl = os.path.join(tempfile.gettempdir(), "%(title).80s.%(ext)s")
+    outtmpl = os.path.join(tempfile.gettempdir(), "%(title).70s.%(ext)s")
 
     ydl_opts = {
         "format": "bestaudio/best",
@@ -85,7 +88,9 @@ def download_audio(title: str, artist: str) -> str | None:
         "quiet": True,
         "no_warnings": True,
         "default_search": "ytsearch",
-        "extract_flat": False,
+        "socket_timeout": 15,
+        "retries": 2,
+        "fragment_retries": 2,
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
@@ -108,7 +113,25 @@ def download_audio(title: str, artist: str) -> str | None:
                 return filename
             return None
     except Exception as e:
-        print("yt-dlp error:", e)
+        print("Download failed:", e)
+        return None
+
+
+async def download_audio(title: str, artist: str) -> str | None:
+    """Run download with timeout so it never hangs forever"""
+    loop = asyncio.get_event_loop()
+    try:
+        # 25 second timeout
+        result = await asyncio.wait_for(
+            loop.run_in_executor(executor, download_audio_sync, title, artist),
+            timeout=25
+        )
+        return result
+    except asyncio.TimeoutError:
+        print("Download timed out")
+        return None
+    except Exception as e:
+        print("Download error:", e)
         return None
 
 
@@ -156,7 +179,6 @@ async def handle_audio(message: types.Message):
             await bot.edit_message_text(error, chat_id=message.chat.id, message_id=status.message_id)
             return
 
-        # Create useful links
         youtube_search = f"https://www.youtube.com/results?search_query={quote(title + ' ' + artist)}"
         spotify_search = f"https://open.spotify.com/search/{quote(title + ' ' + artist)}"
 
@@ -164,13 +186,13 @@ async def handle_audio(message: types.Message):
             f"🎵 **Song Found!**\n\n"
             f"**Title:** {title}\n"
             f"**Artist:** {artist}\n\n"
-            f"⬇️ Trying to download audio...",
+            f"⬇️ Trying to download audio (max 25 seconds)...",
             chat_id=message.chat.id,
             message_id=status.message_id,
             parse_mode="Markdown"
         )
 
-        audio_path = download_audio(title, artist)
+        audio_path = await download_audio(title, artist)
 
         if audio_path and os.path.exists(audio_path):
             with open(audio_path, "rb") as audio:
@@ -181,17 +203,20 @@ async def handle_audio(message: types.Message):
                     performer=artist,
                     caption=f"🎵 {title} - {artist}"
                 )
-            os.unlink(audio_path)
+            try:
+                os.unlink(audio_path)
+            except:
+                pass
 
-            final_text = f"✅ **Done!**\n\n**{title}** by **{artist}** has been sent."
+            final_text = f"✅ **Done!**\n\n**{title}** by **{artist}** has been sent as audio file."
         else:
-            # Fallback when download fails
+            # Fallback – always give useful links
             final_text = (
                 f"🎵 **Song Found!**\n\n"
                 f"**Title:** {title}\n"
                 f"**Artist:** {artist}\n\n"
-                f"❌ Direct download is currently not available (YouTube restriction).\n\n"
-                f"🔗 **Listen here:**\n"
+                f"❌ Direct download is not available right now (YouTube restriction on server).\n\n"
+                f"🔗 **Listen / Download here:**\n"
                 f"▶️ [YouTube Search]({youtube_search})\n"
                 f"🟢 [Spotify Search]({spotify_search})\n"
             )
