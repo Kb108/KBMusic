@@ -1,13 +1,11 @@
 import os
 import asyncio
 import tempfile
-import yt_dlp
 from telebot.async_telebot import AsyncTeleBot
 from telebot import types
 from shazamio import Shazam
 from dotenv import load_dotenv
 from urllib.parse import quote
-from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
 
@@ -20,8 +18,6 @@ shazam = Shazam()
 
 CHANNEL_USERNAME = "loot_dells"
 CHANNEL_LINK = "https://t.me/loot_dells"
-
-executor = ThreadPoolExecutor(max_workers=2)
 
 
 async def is_user_joined(user_id: int) -> bool:
@@ -57,13 +53,16 @@ async def check_join_callback(call: types.CallbackQuery):
         )
     else:
         await bot.answer_callback_query(
-            call.id, "You still haven't joined the channel. Please join first.", show_alert=True
+            call.id,
+            "You still haven't joined the channel. Please join first.",
+            show_alert=True
         )
 
 
 async def recognize_audio(file_path: str):
     try:
         result = await shazam.recognize(file_path)
+
         if not result or "track" not in result:
             return None, None, None, "❌ Sorry, I couldn't recognize the song."
 
@@ -71,68 +70,11 @@ async def recognize_audio(file_path: str):
         title = track.get("title", "Unknown")
         artist = track.get("subtitle", "Unknown Artist")
         shazam_url = track.get("url", "")
+
         return title, artist, shazam_url, None
+
     except Exception as e:
         return None, None, None, f"❌ Recognition error: {str(e)}"
-
-
-def download_audio_sync(title: str, artist: str) -> str | None:
-    """Synchronous download function (runs in thread)"""
-    query = f"ytsearch1:{title} {artist}"
-    outtmpl = os.path.join(tempfile.gettempdir(), "%(title).70s.%(ext)s")
-
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": outtmpl,
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "default_search": "ytsearch",
-        "socket_timeout": 15,
-        "retries": 2,
-        "fragment_retries": 2,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=True)
-            if "entries" in info:
-                info = info["entries"][0]
-
-            filename = ydl.prepare_filename(info)
-            mp3_file = os.path.splitext(filename)[0] + ".mp3"
-
-            if os.path.exists(mp3_file):
-                return mp3_file
-            if os.path.exists(filename):
-                return filename
-            return None
-    except Exception as e:
-        print("Download failed:", e)
-        return None
-
-
-async def download_audio(title: str, artist: str) -> str | None:
-    """Run download with timeout so it never hangs forever"""
-    loop = asyncio.get_event_loop()
-    try:
-        # 25 second timeout
-        result = await asyncio.wait_for(
-            loop.run_in_executor(executor, download_audio_sync, title, artist),
-            timeout=25
-        )
-        return result
-    except asyncio.TimeoutError:
-        print("Download timed out")
-        return None
-    except Exception as e:
-        print("Download error:", e)
-        return None
 
 
 @bot.message_handler(commands=["start", "help"])
@@ -143,8 +85,9 @@ async def start_handler(message: types.Message):
 
     text = (
         "👋 Hello!\n\n"
-        "I am a **Music Recognition Bot**.\n"
-        "Send me any **voice message** or **audio file** and I will identify the song.\n\n"
+        "I am a **Music Recognition Bot**.\n\n"
+        "Send me any **voice message** or **audio file**, "
+        "and I will identify the song for you.\n\n"
         "Commands:\n"
         "/start - Start the bot\n"
         "/help - Show this help message"
@@ -179,49 +122,21 @@ async def handle_audio(message: types.Message):
             await bot.edit_message_text(error, chat_id=message.chat.id, message_id=status.message_id)
             return
 
+        # Create useful links
         youtube_search = f"https://www.youtube.com/results?search_query={quote(title + ' ' + artist)}"
         spotify_search = f"https://open.spotify.com/search/{quote(title + ' ' + artist)}"
 
-        await bot.edit_message_text(
+        final_text = (
             f"🎵 **Song Found!**\n\n"
             f"**Title:** {title}\n"
             f"**Artist:** {artist}\n\n"
-            f"⬇️ Trying to download audio (max 25 seconds)...",
-            chat_id=message.chat.id,
-            message_id=status.message_id,
-            parse_mode="Markdown"
+            f"🔗 **Listen here:**\n"
+            f"▶️ [YouTube Search]({youtube_search})\n"
+            f"🟢 [Spotify Search]({spotify_search})\n"
         )
 
-        audio_path = await download_audio(title, artist)
-
-        if audio_path and os.path.exists(audio_path):
-            with open(audio_path, "rb") as audio:
-                await bot.send_audio(
-                    chat_id=message.chat.id,
-                    audio=audio,
-                    title=title,
-                    performer=artist,
-                    caption=f"🎵 {title} - {artist}"
-                )
-            try:
-                os.unlink(audio_path)
-            except:
-                pass
-
-            final_text = f"✅ **Done!**\n\n**{title}** by **{artist}** has been sent as audio file."
-        else:
-            # Fallback – always give useful links
-            final_text = (
-                f"🎵 **Song Found!**\n\n"
-                f"**Title:** {title}\n"
-                f"**Artist:** {artist}\n\n"
-                f"❌ Direct download is not available right now (YouTube restriction on server).\n\n"
-                f"🔗 **Listen / Download here:**\n"
-                f"▶️ [YouTube Search]({youtube_search})\n"
-                f"🟢 [Spotify Search]({spotify_search})\n"
-            )
-            if shazam_url:
-                final_text += f"🔗 [Shazam]({shazam_url})"
+        if shazam_url:
+            final_text += f"🔗 [Shazam]({shazam_url})"
 
         await bot.edit_message_text(
             final_text,
